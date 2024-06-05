@@ -130,7 +130,9 @@ def send_email_endpoint():
 
 @app.route('/valif', methods=['POST'])
 def verify_email():
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    # driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    service = Service(executable_path=ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service)
     try:
         email = request.json.get('lif')
         driver.get("https://login.microsoftonline.com/")
